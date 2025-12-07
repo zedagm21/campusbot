@@ -1,22 +1,7 @@
--- Migration: Add Google OAuth columns to users table
--- Run this with: psql -U postgres -d campusbot -f add_oauth_columns.sql
+ALTER TABLE users
+ADD COLUMN google_id VARCHAR(255) UNIQUE,
+ADD COLUMN is_google_user BOOLEAN DEFAULT FALSE;
 
--- Add new columns for OAuth support
-ALTER TABLE users 
-ADD COLUMN IF NOT EXISTS is_verified BOOLEAN DEFAULT false,
-ADD COLUMN IF NOT EXISTS auth_provider TEXT DEFAULT 'email',
-ADD COLUMN IF NOT EXISTS google_id TEXT;
-
--- Update existing users to be verified (they used email verification)
-UPDATE users 
-SET is_verified = true 
-WHERE auth_provider = 'email' AND is_verified IS NULL;
-
--- Show the updated table structure
-\d users;
-
--- Verify the changes
-SELECT column_name, data_type, column_default 
-FROM information_schema.columns 
-WHERE table_name = 'users' 
-ORDER BY ordinal_position;
+UPDATE users
+SET is_google_user = FALSE
+WHERE is_google_user IS NULL;
