@@ -29,18 +29,17 @@ async function runSchemaSetup() {
     console.log("[DB Setup] ✅ Initial schema.sql executed successfully.");
 
     // 2. Read and execute the OAuth migration script
-    // NOTE: We need to strip the psql-specific commands like \d and SELECT for it to run cleanly via the Node.js pg library.
     let migrationSql = fs.readFileSync(oauthMigrationPath, "utf-8");
 
-    // Remove psql meta-commands (\d, SELECT) from the migration file
+    // CRITICAL FIX: Ensure only clean, executable SQL is passed.
+    // Filter out ALL comments, psql meta-commands (\d), and verification queries (SELECT).
     migrationSql = migrationSql
       .split("\n")
       .filter(
         (line) =>
-          !line.trim().startsWith("-- Migration:") &&
-          !line.trim().startsWith("-- Run this with:") &&
+          !line.trim().startsWith("--") && // <-- THIS LINE IS CRUCIAL TO REMOVE ALL COMMENTS
           !line.trim().startsWith("\\d") &&
-          !line.trim().startsWith("SELECT")
+          !line.trim().startsWith("SELECT") // <-- THIS LINE IS CRUCIAL TO REMOVE THE SELECT STATEMENT
       )
       .join("\n");
 
@@ -52,13 +51,11 @@ async function runSchemaSetup() {
     console.log("[DB Setup] Database setup complete. Tables created.");
   } catch (err) {
     // Crucial: Log error but DO NOT EXIT if tables already exist.
-    // This script should run every time, but only initialize the DB the first time.
     if (err.code === "42P07") {
       // 42P07 is the code for 'duplicate_table' error
       console.log("[DB Setup] Tables already exist. Skipping initialization.");
     } else {
       console.error("[DB Setup] ❌ FATAL ERROR during DB setup:", err.message);
-      // We still throw the error if it's something else to alert the user
       throw err;
     }
   } finally {
