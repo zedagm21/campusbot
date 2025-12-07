@@ -1,0 +1,39 @@
+services:
+  # Backend Service
+  - type: web
+    name: campusbot-backend
+    env: node
+    rootDir: backend
+    buildCommand: npm install
+    startCommand: npm start
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: NODE_VERSION
+        value: 20.11.0
+      - key: FRONTEND_URL
+        fromService:
+          type: static
+          name: campusbot-frontend
+          property: url
+  
+  # Frontend Service
+  - type: static
+    name: campusbot-frontend
+    env: static
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: ./dist
+    envVars:
+      - key: VITE_API_URL
+        fromService:
+          type: web
+          name: campusbot-backend
+          property: url
+
+databases:
+  - name: campusbot-db
+    plan: free
+    databaseName: campusbot
+    user: campusbot_user
+
