@@ -1,10 +1,7 @@
 import { useState } from "react";
-// FIX: Reverting to standard path without the explicit file extension (.js)
-import api from "../services/api";
+import axios from "axios";
 import { useNavigate, Link } from "react-router-dom";
-// FIX: Reverting to standard path without the explicit file extension (.jsx)
 import GoogleAuthButton from "../components/GoogleAuthButton";
-// FIX: Reverting to standard path without the explicit file extension (.jsx)
 import PasswordInput from "../components/PasswordInput";
 
 export default function Login({ onLogin }) {
@@ -19,8 +16,8 @@ export default function Login({ onLogin }) {
     setErr("");
     setLoading(true);
     try {
-      // Logic for using the centralized 'api' service remains correct
-      const r = await api.post("/auth/login", {
+      const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
+      const r = await axios.post(`${API_URL}/api/auth/login`, {
         email,
         password: pw,
       });
@@ -34,14 +31,7 @@ export default function Login({ onLogin }) {
         setErr("No token returned");
       }
     } catch (e) {
-      // Improved error message for network issues
-      if (e.code === "ERR_NETWORK") {
-        setErr(
-          "Could not connect to the backend server. Please check the deployment status."
-        );
-      } else {
-        setErr(e.response?.data?.error || "Login failed");
-      }
+      setErr(e.response?.data?.error || "Login failed");
     } finally {
       setLoading(false);
     }
