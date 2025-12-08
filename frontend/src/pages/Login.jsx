@@ -1,7 +1,10 @@
 import { useState } from "react";
-import axios from "axios";
+// FIX: Reverting to standard path without the explicit file extension (.js)
+import api from "../services/api";
 import { useNavigate, Link } from "react-router-dom";
+// FIX: Reverting to standard path without the explicit file extension (.jsx)
 import GoogleAuthButton from "../components/GoogleAuthButton";
+// FIX: Reverting to standard path without the explicit file extension (.jsx)
 import PasswordInput from "../components/PasswordInput";
 
 export default function Login({ onLogin }) {
@@ -16,8 +19,8 @@ export default function Login({ onLogin }) {
     setErr("");
     setLoading(true);
     try {
-      const API_URL = import.meta.env.VITE_API_URL || "http://localhost:4000";
-      const r = await axios.post(`${API_URL}/api/auth/login`, {
+      // Logic for using the centralized 'api' service remains correct
+      const r = await api.post("/auth/login", {
         email,
         password: pw,
       });
@@ -31,7 +34,14 @@ export default function Login({ onLogin }) {
         setErr("No token returned");
       }
     } catch (e) {
-      setErr(e.response?.data?.error || "Login failed");
+      // Improved error message for network issues
+      if (e.code === "ERR_NETWORK") {
+        setErr(
+          "Could not connect to the backend server. Please check the deployment status."
+        );
+      } else {
+        setErr(e.response?.data?.error || "Login failed");
+      }
     } finally {
       setLoading(false);
     }
@@ -47,7 +57,9 @@ export default function Login({ onLogin }) {
           <div className="absolute bottom-0 left-0 w-32 h-32 bg-white/10 rounded-full -ml-16 -mb-16"></div>
 
           <div className="relative z-10 text-center">
-            <h1 className="text-3xl xl:text-4xl font-bold mb-4">Welcome Back!</h1>
+            <h1 className="text-3xl xl:text-4xl font-bold mb-4">
+              Welcome Back!
+            </h1>
             <p className="text-teal-100 mb-6 text-base xl:text-lg">
               To keep connected with us please login with your personal info
             </p>
@@ -68,10 +80,16 @@ export default function Login({ onLogin }) {
               <div className="w-10 h-10 bg-gradient-to-br from-teal-500 to-cyan-600 rounded-xl flex items-center justify-center">
                 <span className="text-white font-bold">CB</span>
               </div>
-              <span className="text-2xl font-bold text-gray-800 dark:text-white">CampusBot</span>
+              <span className="text-2xl font-bold text-gray-800 dark:text-white">
+                CampusBot
+              </span>
             </div>
-            <h2 className="text-2xl lg:text-3xl font-bold text-gray-800 dark:text-white mt-2">Sign In</h2>
-            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Use your account</p>
+            <h2 className="text-2xl lg:text-3xl font-bold text-gray-800 dark:text-white mt-2">
+              Sign In
+            </h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">
+              Use your account
+            </p>
           </div>
 
           {/* Social Login */}
@@ -85,7 +103,9 @@ export default function Login({ onLogin }) {
               <div className="w-full border-t border-gray-300 dark:border-gray-600"></div>
             </div>
             <div className="relative flex justify-center text-sm">
-              <span className="px-4 bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400">or use your email</span>
+              <span className="px-4 bg-white dark:bg-gray-800 text-gray-500 dark:text-gray-400">
+                or use your email
+              </span>
             </div>
           </div>
 
@@ -130,10 +150,11 @@ export default function Login({ onLogin }) {
             <button
               type="submit"
               disabled={loading}
-              className={`w-full py-2.5 px-4 text-white font-bold rounded-full transition-all duration-300 ${loading
-                ? "bg-gray-400 cursor-not-allowed"
-                : "bg-gradient-to-r from-teal-500 to-cyan-600 hover:from-teal-600 hover:to-cyan-700 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
-                }`}
+              className={`w-full py-2.5 px-4 text-white font-bold rounded-full transition-all duration-300 ${
+                loading
+                  ? "bg-gray-400 cursor-not-allowed"
+                  : "bg-gradient-to-r from-teal-500 to-cyan-600 hover:from-teal-600 hover:to-cyan-700 shadow-lg hover:shadow-xl transform hover:-translate-y-0.5"
+              }`}
             >
               {loading ? "SIGNING IN..." : "SIGN IN"}
             </button>
@@ -142,7 +163,10 @@ export default function Login({ onLogin }) {
           {/* Mobile Sign Up Link */}
           <p className="text-center text-sm text-gray-600 dark:text-gray-400 mt-5 lg:hidden">
             Don't have an account?{" "}
-            <Link to="/register" className="font-semibold text-teal-600 dark:text-teal-400 hover:text-teal-700 dark:hover:text-teal-300">
+            <Link
+              to="/register"
+              className="font-semibold text-teal-600 dark:text-teal-400 hover:text-teal-700 dark:hover:text-teal-300"
+            >
               Sign Up
             </Link>
           </p>
