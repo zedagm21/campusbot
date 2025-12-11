@@ -46,8 +46,8 @@ async function generateTitleWithLLM(rawText) {
   if (!key) throw new Error("Gemini API key not configured");
 
   const safe = redactPII(String(rawText).slice(0, 500));
-  // [GEMINI UPDATE] Using GEMINI_TITLE_MODEL or default to gemini-1.5-flash
-  const model = process.env.GEMINI_TITLE_MODEL || "gemini-1.5-flash";
+  // [GEMINI UPDATE] Using GEMINI_TITLE_MODEL or default to specific version
+  const model = process.env.GEMINI_TITLE_MODEL || "gemini-1.5-flash-001";
 
   const systemPrompt =
     "You are a helpful assistant that creates concise 3-5 word titles summarizing a user's question. Return only the title as plain text, no punctuation or commentary.";
@@ -115,7 +115,7 @@ async function extractGradeParamsWithLLM(
   if (!key) throw new Error("Gemini API key not configured");
 
   // [GEMINI UPDATE] Using GEMINI_MODEL or default
-  const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+  const model = process.env.GEMINI_MODEL || "gemini-1.5-flash-001";
 
   const system = `You are the CampusBot academic assistant. Your primary function is to resolve user requests with absolute precision and filter responses aggressively.
 
@@ -832,7 +832,7 @@ export async function handleChat(req, res) {
 
     // [GEMINI UPDATE] Using GEMINI_API_KEY and GEMINI_MODEL
     const geminiKey = process.env.GEMINI_API_KEY;
-    const geminiModel = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+    const geminiModel = process.env.GEMINI_MODEL || "gemini-1.5-flash-001";
 
     if (!geminiKey) {
       console.error("Gemini API key missing for chat fallback.");
@@ -851,7 +851,7 @@ export async function handleChat(req, res) {
       },
     };
 
-    const geminiResp = await fetch(
+    let geminiResp = await fetch(
       `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`,
       {
         method: "POST",
@@ -861,6 +861,19 @@ export async function handleChat(req, res) {
         body: JSON.stringify(body),
       }
     );
+
+    // simple fallback: if 404 (model not found), try 'gemini-pro'
+    if (geminiResp.status === 404) {
+      console.warn(`Primary model ${geminiModel} not found (404). Retrying with 'gemini-pro'...`);
+      geminiResp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${geminiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
+    }
 
     if (!geminiResp.ok) {
       const errText = await geminiResp.text();
