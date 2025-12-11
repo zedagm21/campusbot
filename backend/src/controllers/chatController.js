@@ -38,53 +38,60 @@ function generateTitleFromMessageLocal(text) {
   return title || "Untitled conversation";
 }
 
-// --- LLM title generator (optional) ---
-// Uses OpenAI chat completions to produce a concise 3-5 word title.
-// Returns the title string, or throws on fatal errors (caller will fallback).
+// --- Gemini Title Generator (Replaces OpenAI) ---
+// Uses Google Gemini API to produce a concise 3-5 word title.
 async function generateTitleWithLLM(rawText) {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error("OpenAI API key not configured");
+  // [GEMINI UPDATE] Using GEMINI_API_KEY
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("Gemini API key not configured");
 
   const safe = redactPII(String(rawText).slice(0, 500));
-  const model = process.env.OPENAI_TITLE_MODEL || "gpt-4o-mini";
+  // [GEMINI UPDATE] Using GEMINI_TITLE_MODEL or default to gemini-1.5-flash
+  const model = process.env.GEMINI_TITLE_MODEL || "gemini-1.5-flash";
 
-  const system = "You are a helpful assistant that creates concise 3-5 word titles summarizing a user's question. Return only the title as plain text, no punctuation or commentary.";
+  const systemPrompt =
+    "You are a helpful assistant that creates concise 3-5 word titles summarizing a user's question. Return only the title as plain text, no punctuation or commentary.";
 
-  const user = `Create a very short (3-5 words) title for this student question. Keep it informal and clear.
+  const userPrompt = `Create a very short (3-5 words) title for this student question. Keep it informal and clear.\n\nQuestion: "${safe}"\n\nTitle:`;
 
-Question: "${safe}"
-
-Title:`;
-
+  // [GEMINI UPDATE] Request body structure
   const body = {
-    model,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
+    contents: [
+      {
+        parts: [
+          { text: systemPrompt + "\n\n" + userPrompt }
+        ]
+      }
     ],
-    max_tokens: 16,
-    temperature: 0.2,
-    n: 1,
+    generationConfig: {
+      maxOutputTokens: 20,
+      temperature: 0.2,
+    },
   };
 
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify(body),
-  });
+  // [GEMINI UPDATE] Gemini API Endpoint
+  const resp = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }
+  );
 
   if (!resp.ok) {
     const text = await resp.text();
-    const err = new Error("OpenAI title generation failed");
+    const err = new Error("Gemini title generation failed");
     err.details = text;
     throw err;
   }
 
   const data = await resp.json();
-  const raw = data?.choices?.[0]?.message?.content ?? "";
+  // [GEMINI UPDATE] Response parsing
+  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+
   let title = String(raw)
     .trim()
     .replace(/^["'`]+|["'`]+$/g, "")
@@ -94,16 +101,21 @@ Title:`;
   if (title.length > 60) title = title.slice(0, 57).trim() + "...";
   title = title.charAt(0).toUpperCase() + title.slice(1);
 
-  if (!title) throw new Error("LLM returned empty title");
+  if (!title) throw new Error("Gemini returned empty title");
   return title;
 }
 
-// --- LLM Grade Parameter Extractor ---
-async function extractGradeParamsWithLLM(userMessage, conversationHistory = []) {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error("OpenAI API key not configured");
+// --- Gemini Grade Parameter Extractor (Replaces OpenAI) ---
+async function extractGradeParamsWithLLM(
+  userMessage,
+  conversationHistory = []
+) {
+  // [GEMINI UPDATE] Using GEMINI_API_KEY
+  const key = process.env.GEMINI_API_KEY;
+  if (!key) throw new Error("Gemini API key not configured");
 
-  const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+  // [GEMINI UPDATE] Using GEMINI_MODEL or default
+  const model = process.env.GEMINI_MODEL || "gemini-1.5-flash";
 
   const system = `You are the CampusBot academic assistant. Your primary function is to resolve user requests with absolute precision and filter responses aggressively.
 
@@ -142,45 +154,53 @@ Transmit the request using the standard JSON structure:
   let contextStr = "";
   if (conversationHistory && conversationHistory.length > 0) {
     contextStr = "\n\nConversation History (last 3 messages):\n";
-    conversationHistory.slice(-3).forEach(msg => {
+    conversationHistory.slice(-3).forEach((msg) => {
       contextStr += `${msg.sender}: ${msg.text}\n`;
     });
   }
 
   const user = `${contextStr}\nCurrent Student Question: "${userMessage}"\n\nJSON:`;
 
+  // [GEMINI UPDATE] Request body with JSON response config
   const body = {
-    model,
-    messages: [
-      { role: "system", content: system },
-      { role: "user", content: user },
+    contents: [
+      {
+        role: "user",
+        parts: [{ text: system + "\n\n" + user }],
+      },
     ],
-    max_tokens: 100,
-    temperature: 0,
-    response_format: { type: "json_object" }
+    generationConfig: {
+      maxOutputTokens: 100,
+      temperature: 0,
+      response_mime_type: "application/json", // Enforce JSON
+    },
   };
 
-  const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${key}`,
-    },
-    body: JSON.stringify(body),
-  });
+  // [GEMINI UPDATE] Gemini API Endpoint
+  const resp = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
+    }
+  );
 
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`OpenAI extraction failed: ${text}`);
+    throw new Error(`Gemini extraction failed: ${text}`);
   }
 
   const data = await resp.json();
-  const raw = data?.choices?.[0]?.message?.content ?? "{}";
+  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
+
   try {
-    console.log("DEBUG: LLM Raw Output:", raw);
+    console.log("DEBUG: GEMINI Raw Output:", raw);
     return JSON.parse(raw);
   } catch (e) {
-    console.error("Failed to parse LLM JSON:", raw);
+    console.error("Failed to parse GEMINI JSON:", raw);
     return {};
   }
 }
@@ -206,8 +226,9 @@ export async function handleChat(req, res) {
     // session handling
     let sessionId = req.body.sessionId ? Number(req.body.sessionId) : null;
     let sessionTitle = null;
+    // [GEMINI UPDATE] Env var for enabling logic
     const useLLMTitle =
-      String(process.env.ENABLE_OPENAI_TITLES || "false").toLowerCase() ===
+      String(process.env.ENABLE_GEMINI_TITLES || process.env.ENABLE_OPENAI_TITLES || "false").toLowerCase() ===
       "true";
 
     // safe message count for logging (avoid querying with null sessionId)
@@ -378,7 +399,10 @@ export async function handleChat(req, res) {
         const username = parts[1];
         const password = parts.slice(2).join(" "); // allow spaces in password if any? usually not but safe
 
-        const loginRes = await PortalLoginService.loginToPortal(username, password);
+        const loginRes = await PortalLoginService.loginToPortal(
+          username,
+          password
+        );
 
         if (loginRes.success) {
           // Store cookies AND encrypted credentials in DB
@@ -458,7 +482,8 @@ export async function handleChat(req, res) {
 
     // ---------- 2) Portal/Grades intent detection ----------
     // Improved regex to handle variations and typos: grade, cgpa, gpa, result, mark, score, garde, status, breakdown, courses, subjects, semester
-    const gradesRegex = /(grade|cgpa|gpa|result|mark|score|garde|status|breakdown|courses|subjects|semester)/i;
+    const gradesRegex =
+      /(grade|cgpa|gpa|result|mark|score|garde|status|breakdown|courses|subjects|semester)/i;
     const looksLikeGrades = gradesRegex.test(msgLower);
 
     if (looksLikeGrades) {
@@ -532,24 +557,38 @@ export async function handleChat(req, res) {
         );
         const conversationHistory = historyRes.rows.reverse(); // Oldest first
 
-        options = await extractGradeParamsWithLLM(userMessageSafe, conversationHistory);
+        options = await extractGradeParamsWithLLM(
+          userMessageSafe,
+          conversationHistory
+        );
         console.log("DEBUG: LLM Extracted options:", options);
       } catch (err) {
-        console.error("LLM extraction failed, falling back to null options (latest):", err);
+        console.error(
+          "LLM extraction failed, falling back to null options (latest):",
+          err
+        );
       }
 
       // Fetch real grades from portal
       try {
         let cookies = JSON.parse(cookiesJson);
-        let gradesResult = await PortalLoginService.fetchGrades(cookies, options);
+        let gradesResult = await PortalLoginService.fetchGrades(
+          cookies,
+          options
+        );
 
         // Retry logic: If failed, try to re-login and fetch again
         if (!gradesResult.success && encryptedPass && portalUser) {
-          console.log("Fetch failed (likely session expired). Attempting auto-re-login...");
+          console.log(
+            "Fetch failed (likely session expired). Attempting auto-re-login..."
+          );
           try {
             const decryptedPass = decrypt(encryptedPass);
             if (decryptedPass) {
-              const loginRes = await PortalLoginService.loginToPortal(portalUser, decryptedPass);
+              const loginRes = await PortalLoginService.loginToPortal(
+                portalUser,
+                decryptedPass
+              );
               if (loginRes.success) {
                 console.log("Re-login successful. Retrying fetch...");
                 cookies = loginRes.cookies;
@@ -559,7 +598,10 @@ export async function handleChat(req, res) {
                   [JSON.stringify(cookies), userId]
                 );
                 // Retry fetch with new cookies
-                gradesResult = await PortalLoginService.fetchGrades(cookies, options);
+                gradesResult = await PortalLoginService.fetchGrades(
+                  cookies,
+                  options
+                );
               } else {
                 console.error("Re-login failed:", loginRes.error);
               }
@@ -572,7 +614,8 @@ export async function handleChat(req, res) {
         // If still failed after retry
         if (!gradesResult.success) {
           console.error("Failed to fetch grades even after retry.");
-          const reply = "I found an issue with your current portal session. While I could connect, the system rejected the grade request. This usually means the session is invalid or the credentials are incorrect. Please ensure your username and password are correct, log out of the portal settings, and then log back in.";
+          const reply =
+            "I found an issue with your current portal session. While I could connect, the system rejected the grade request. This usually means the session is invalid or the credentials are incorrect. Please ensure your username and password are correct, log out of the portal settings, and then log back in.";
 
           await db.query(
             `INSERT INTO messages (session_id, sender, text) VALUES ($1,$2,$3)`,
@@ -591,7 +634,8 @@ export async function handleChat(req, res) {
         let reply = "";
 
         if (!gradesData || gradesData.length === 0) {
-          reply = "I successfully accessed the portal, but I couldn't find any grade records for the specified year/semester.";
+          reply =
+            "I successfully accessed the portal, but I couldn't find any grade records for the specified year/semester.";
         } else {
           const detailLevel = options.detail_level || "summary";
           const courseFilter = options.course_filter || null;
@@ -604,35 +648,54 @@ export async function handleChat(req, res) {
           let foundAnyCourse = false;
 
           for (const g of gradesData) {
-            console.log(`DEBUG: Checking Year ${g.batch}, Semester ${g.semester}, courses count: ${g.courses ? g.courses.length : 0}`);
+            console.log(
+              `DEBUG: Checking Year ${g.batch}, Semester ${g.semester
+              }, courses count: ${g.courses ? g.courses.length : 0}`
+            );
 
             // If strict course filtering is on, we ONLY show the course if found.
             // We do NOT show the semester summary unless we found the course in it.
 
             if (courseFilter) {
               if (g.courses && g.courses.length > 0) {
-                console.log(`DEBUG: First 3 course titles in Year ${g.batch} Sem ${g.semester}:`,
-                  g.courses.slice(0, 3).map(c => c.CourseTitle || c.CourseName || "NO TITLE"));
+                console.log(
+                  `DEBUG: First 3 course titles in Year ${g.batch} Sem ${g.semester}:`,
+                  g.courses
+                    .slice(0, 3)
+                    .map((c) => c.CourseTitle || c.CourseName || "NO TITLE")
+                );
 
                 const filterLower = courseFilter.toLowerCase();
-                const matchingCourses = g.courses.filter(c => {
+                const matchingCourses = g.courses.filter((c) => {
                   const title = (c.CourseTitle || "").toLowerCase();
                   const code = (c.CourseCode || "").toLowerCase();
-                  return title.includes(filterLower) || code.includes(filterLower);
+                  return (
+                    title.includes(filterLower) || code.includes(filterLower)
+                  );
                 });
 
                 if (matchingCourses.length > 0) {
                   foundAnyCourse = true;
                   // Found matches! Format them.
-                  const courseLines = matchingCourses.map(c => {
-                    const name = c.CourseTitle || c.CourseName || "Unknown Course";
-                    const code = c.CourseCode || "";
-                    const grade = c.LetterGrade || c.Letter || c.Grade || c.StudentGrade || "-";
-                    return `${name} (${code}): ${grade}`;
-                  }).join("\n");
+                  const courseLines = matchingCourses
+                    .map((c) => {
+                      const name =
+                        c.CourseTitle || c.CourseName || "Unknown Course";
+                      const code = c.CourseCode || "";
+                      const grade =
+                        c.LetterGrade ||
+                        c.Letter ||
+                        c.Grade ||
+                        c.StudentGrade ||
+                        "-";
+                      return `${name} (${code}): ${grade}`;
+                    })
+                    .join("\n");
 
                   // Add to output. We can optionally include the semester header for context
-                  formattedParts.push(`Year ${g.batch}, Semester ${g.semester}\n${courseLines}`);
+                  formattedParts.push(
+                    `Year ${g.batch}, Semester ${g.semester}\n${courseLines}`
+                  );
                 }
               }
             } else {
@@ -642,14 +705,26 @@ export async function handleChat(req, res) {
               text += `• CGPA: ${g.cgpa}\n`;
               text += `• Status: ${g.status}`;
 
-              if (detailLevel === "detailed" && g.courses && g.courses.length > 0) {
+              if (
+                detailLevel === "detailed" &&
+                g.courses &&
+                g.courses.length > 0
+              ) {
                 text += `\n\nCourse Breakdown:\n`;
-                text += g.courses.map(c => {
-                  const name = c.CourseTitle || c.CourseName || "Unknown Course";
-                  const code = c.CourseCode || "";
-                  const grade = c.LetterGrade || c.Letter || c.Grade || c.StudentGrade || "-";
-                  return `• ${name} (${code}): ${grade}`;
-                }).join("\n");
+                text += g.courses
+                  .map((c) => {
+                    const name =
+                      c.CourseTitle || c.CourseName || "Unknown Course";
+                    const code = c.CourseCode || "";
+                    const grade =
+                      c.LetterGrade ||
+                      c.Letter ||
+                      c.Grade ||
+                      c.StudentGrade ||
+                      "-";
+                    return `• ${name} (${code}): ${grade}`;
+                  })
+                  .join("\n");
               } else if (detailLevel === "detailed") {
                 text += `\n\n(No detailed course information available for this semester)`;
               }
@@ -664,7 +739,8 @@ export async function handleChat(req, res) {
               reply = `I couldn't find any course matching "${courseFilter}" in your records.`;
             }
           } else {
-            reply = "Here are your results:\n\n" + formattedParts.join("\n\n---\n\n");
+            reply =
+              "Here are your results:\n\n" + formattedParts.join("\n\n---\n\n");
           }
         }
 
@@ -678,23 +754,23 @@ export async function handleChat(req, res) {
         );
 
         return res.json({ reply, source: "portal", sessionId, sessionTitle });
-
       } catch (err) {
         console.error("Error fetching grades:", err);
 
         // Check if this is an authentication/authorization error
-        const isAuthError = err.message && (
-          err.message.includes("401") ||
-          err.message.includes("403") ||
-          err.message.includes("Unauthorized") ||
-          err.message.includes("authentication") ||
-          err.message.includes("session") ||
-          err.code === "ERR_BAD_REQUEST"
-        );
+        const isAuthError =
+          err.message &&
+          (err.message.includes("401") ||
+            err.message.includes("403") ||
+            err.message.includes("Unauthorized") ||
+            err.message.includes("authentication") ||
+            err.message.includes("session") ||
+            err.code === "ERR_BAD_REQUEST");
 
         let reply;
         if (isAuthError) {
-          reply = "⚠️ I'm having trouble accessing your grades from the portal. This usually happens when your session has expired.\n\n" +
+          reply =
+            "⚠️ I'm having trouble accessing your grades from the portal. This usually happens when your session has expired.\n\n" +
             "📍 **To reconnect:**\n" +
             "1. Click on your profile picture (top right)\n" +
             "2. Select 'Portal Settings'\n" +
@@ -702,7 +778,8 @@ export async function handleChat(req, res) {
             "4. Re-enter your credentials and click 'Save & Connect'\n\n" +
             "This will refresh your connection to the student portal.";
         } else {
-          reply = "I encountered an unexpected error while fetching your grades. Please try again later or contact support if the issue persists.";
+          reply =
+            "I encountered an unexpected error while fetching your grades. Please try again later or contact support if the issue persists.";
         }
 
         await db.query(
@@ -737,7 +814,7 @@ export async function handleChat(req, res) {
       return res.json({ reply, source: "faq", sessionId, sessionTitle });
     }
 
-    // ---------- 3) OpenAI fallback ----------
+    // ---------- 4) Gemini fallback (Replaces OpenAI) ----------
     const contextRes = await db.query(
       `SELECT question, answer FROM faqs ORDER BY created_at DESC LIMIT 3`
     );
@@ -747,39 +824,47 @@ export async function handleChat(req, res) {
 
     const systemMessage = `You are CampusBot — a helpful university assistant. Use the facts in the FAQ snippets when relevant. Be concise. Do NOT invent personal data.`;
 
-    const assistantPrompt = [
-      { role: "system", content: systemMessage },
-      ...(faqSnippets.length
-        ? [
-          {
-            role: "system",
-            content: `Relevant FAQs:\n${faqSnippets.join("\n\n")}`,
-          },
-        ]
-        : []),
-      { role: "user", content: `Student asked: ${userMessageSafe}` },
-    ];
+    const faqContext = faqSnippets.length
+      ? `Relevant FAQs:\n${faqSnippets.join("\n\n")}`
+      : "";
 
-    const openaiResp = await fetch(
-      "https://api.openai.com/v1/chat/completions",
+    const userPrompt = `${faqContext}\nStudent asked: ${userMessageSafe}`;
+
+    // [GEMINI UPDATE] Using GEMINI_API_KEY and GEMINI_MODEL
+    const geminiKey = process.env.GEMINI_API_KEY;
+    const geminiModel = process.env.GEMINI_MODEL || "gemini-1.5-flash";
+
+    if (!geminiKey) {
+      console.error("Gemini API key missing for chat fallback.");
+      throw new Error("Gemini API key not configured");
+    }
+
+    const body = {
+      contents: [
+        {
+          parts: [{ text: systemMessage + "\n\n" + userPrompt }],
+        },
+      ],
+      generationConfig: {
+        maxOutputTokens: 2000,
+        temperature: 0.2,
+      },
+    };
+
+    const geminiResp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`,
       {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         },
-        body: JSON.stringify({
-          model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-          messages: assistantPrompt,
-          max_tokens: 2000,
-          temperature: 0.2,
-        }),
+        body: JSON.stringify(body),
       }
     );
 
-    if (!openaiResp.ok) {
-      const errText = await openaiResp.text();
-      console.error("OpenAI error:", openaiResp.status, errText);
+    if (!geminiResp.ok) {
+      const errText = await geminiResp.text();
+      console.error("Gemini error:", geminiResp.status, errText);
       const fallbackReply =
         "I couldn't generate an answer right now. Please try again later.";
       await db.query(
@@ -798,8 +883,8 @@ export async function handleChat(req, res) {
       });
     }
 
-    const openaiData = await openaiResp.json();
-    const aiText = openaiData?.choices?.[0]?.message?.content?.trim();
+    const geminiData = await geminiResp.json();
+    const aiText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
     const reply =
       aiText ||
       "I couldn't generate an answer right now. Please try again later.";
@@ -813,7 +898,7 @@ export async function handleChat(req, res) {
       [sessionId]
     );
 
-    return res.json({ reply, source: "openai", sessionId, sessionTitle });
+    return res.json({ reply, source: "gemini", sessionId, sessionTitle });
   } catch (err) {
     console.error("Chat error:", err);
     return res.status(500).json({ error: "Server error" });
