@@ -38,63 +38,87 @@ function generateTitleFromMessageLocal(text) {
   return title || "Untitled conversation";
 }
 
-// --- Gemini Title Generator (Replaces OpenAI) ---
-// Uses Google Gemini API to produce a concise 3-5 word title.
-async function generateTitleWithLLM(rawText) {
-  // [GEMINI UPDATE] Using GEMINI_API_KEY
+// [GEMINI UPDATE] Shared Helper for API calls with Fallback
+async function callGeminiWithFallbacks({ systemPrompt, userPrompt, jsonMode = false }) {
   const key = process.env.GEMINI_API_KEY;
   if (!key) throw new Error("Gemini API key not configured");
 
-  const safe = redactPII(String(rawText).slice(0, 500));
-  // [GEMINI UPDATE] Using GEMINI_TITLE_MODEL or default to specific version
-  const model = process.env.GEMINI_TITLE_MODEL || "gemini-1.5-flash-001";
+  // Models to try in order of preference
+  const envModel = process.env.GEMINI_MODEL;
+  const modelsToTry = [
+    envModel,
+    "gemini-2.0-flash",
+    "gemini-2.5-flash",
+    "gemini-flash-latest"
+  ].filter(Boolean);
 
-  const systemPrompt =
-    "You are a helpful assistant that creates concise 3-5 word titles summarizing a user's question. Return only the title as plain text, no punctuation or commentary.";
+  const uniqueModels = [...new Set(modelsToTry)];
+  console.log("DEBUG: Attempting Gemini with models:", uniqueModels);
 
-  const userPrompt = `Create a very short (3-5 words) title for this student question. Keep it informal and clear.\n\nQuestion: "${safe}"\n\nTitle:`;
+  let lastError = null;
 
-  // [GEMINI UPDATE] Request body structure
-  const body = {
-    contents: [
-      {
-        parts: [
-          { text: systemPrompt + "\n\n" + userPrompt }
-        ]
+  for (const model of uniqueModels) {
+    try {
+      if (lastError) await new Promise(r => setTimeout(r, 1000));
+
+      const body = {
+        contents: [
+          {
+            parts: [{ text: (systemPrompt ? systemPrompt + "\n\n" : "") + userPrompt }],
+          },
+        ],
+        generationConfig: {
+          maxOutputTokens: jsonMode ? 500 : 2000,
+          temperature: 0.1,
+          response_mime_type: jsonMode ? "application/json" : "text/plain",
+        },
+      };
+
+      console.log(`DEBUG: Trying model ${model}...`);
+      const resp = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }
+      );
+
+      if (resp.status === 404) throw new Error(`Model ${model} not found (404)`);
+      if (resp.status === 503) throw new Error(`Model ${model} overloaded (503)`);
+      if (!resp.ok) {
+        const text = await resp.text();
+        throw new Error(`API Error ${resp.status}: ${text}`);
       }
-    ],
-    generationConfig: {
-      maxOutputTokens: 20,
-      temperature: 0.2,
-    },
-  };
 
-  // [GEMINI UPDATE] Gemini API Endpoint
-  const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
+      const data = await resp.json();
+      const candidate = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+      if (!candidate) throw new Error("Empty response candidate");
+      return candidate;
+
+    } catch (err) {
+      console.warn(`WARNING: Failed with model ${model}:`, err.message);
+      lastError = err;
     }
-  );
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    const err = new Error("Gemini title generation failed");
-    err.details = text;
-    throw err;
   }
 
-  const data = await resp.json();
-  // [GEMINI UPDATE] Response parsing
-  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+  throw lastError || new Error("All Gemini models failed.");
+}
+
+
+// --- Gemini Title Generator (Replaces OpenAI) ---
+async function generateTitleWithLLM(rawText) {
+  const safe = redactPII(String(rawText).slice(0, 500));
+
+  const systemPrompt = "You are a helpful assistant that creates concise 3-5 word titles summarizing a user's question. Return only the title as plain text, no punctuation or commentary.";
+  const userPrompt = `Create a very short (3-5 words) title for this student question. Keep it informal and clear.\n\nQuestion: "${safe}"\n\nTitle:`;
+
+  const raw = await callGeminiWithFallbacks({ systemPrompt, userPrompt });
 
   let title = String(raw)
     .trim()
     .replace(/^["'`]+|["'`]+$/g, "")
+    .replace(/^Title:\s*/i, "")
     .replace(/\n/g, " ")
     .trim();
 
@@ -110,45 +134,36 @@ async function extractGradeParamsWithLLM(
   userMessage,
   conversationHistory = []
 ) {
-  // [GEMINI UPDATE] Using GEMINI_API_KEY
-  const key = process.env.GEMINI_API_KEY;
-  if (!key) throw new Error("Gemini API key not configured");
-
-  // [GEMINI UPDATE] Using GEMINI_MODEL or default
-  const model = process.env.GEMINI_MODEL || "gemini-1.5-flash-001";
-
-  const system = `You are the CampusBot academic assistant. Your primary function is to resolve user requests with absolute precision and filter responses aggressively.
+  const system = `You are a strict JSON API. You receive a user query and output ONLY a JSON object.
 
 1. MANDATE: SPECIFIC COURSE SEARCH & FILTERING
 When the user names a specific course (e.g., "english," "Object Oriented Programming"):
-
-Rule 1: Search Scope: You MUST search for that course across ALL years and semesters recorded in the student's history, not just the latest or the one year mentioned.
-
-Rule 2: Output Filter: You MUST filter the final output to display ONLY the result for the named course (e.g., "General Psychology: A"). You are STRICTLY FORBIDDEN from returning the rest of the semester's courses or the entire year's data.
-
-Rule 3: CRITICAL - Detail Level: When a course_filter is specified, you MUST ALWAYS set detail_level to "detailed". This is mandatory because we need to fetch individual course data to search through.
+- set "course_filter" to the course name.
+- set "detail_level" to "detailed".
 
 2. MANDATE: CONTEXTUAL MEMORY
-If the user answers a clarifying question with a simple affirmation ("yes," "correct," etc.), you MUST immediately execute the pending request (e.g., provide the breakdown for Year 3, Semester 2). DO NOT lose the thread and ask "How can I assist you?"
+If the user answers a clarifying question with a simple affirmation ("yes," "correct"), infer context from history.
 
-3. YEAR AND SEMESTER EXTRACTION (CRITICAL):
-- Extract year numbers from phrases like "Year 3", "year 3", "Yir 3", "3rd year", "third year" → year: 3
-- Extract semester numbers from phrases like "sem 2", "semester 2", "Semester II", "second semester" → semester: 2 (convert Roman numerals: I=1, II=2)
-- If BOTH year AND semester are mentioned, extract BOTH values
-- If only year is mentioned, set semester to null
-- If only semester is mentioned, set year to null
-- If neither is mentioned, set both to null
+3. YEAR AND SEMESTER EXTRACTION:
+- Extract year numbers (Year 3, 3rd year -> 3)
+- Extract semester numbers (sem 2, Semester II -> 2)
+- If mentioned, set them. If not, set to null.
 
-4. DETAIL LEVEL RULES (CRITICAL):
-- If user asks for "breakdown", "courses", "subjects", "marks", "each course", "show me courses", "details", "detailed", or mentions a specific course name → detail_level MUST be "detailed"
-- If user asks for "GPA", "CGPA", "overall result", "summary" ONLY (without asking for courses) → detail_level can be "summary"
-- When in doubt, use "detailed"
+4. DETAIL LEVEL RULES:
+- "breakdown", "courses", "marks", "details" -> "detailed"
+- "GPA", "CGPA", "summary" -> "summary"
+- Default -> "detailed"
 
-All other system behaviors (GPA/CGPA requests, API payload) remain standard. Focus entirely on executing the mandates above.
+OUTPUT FORMAT:
+{
+  "request_type": "get_grade",
+  "year": <number|null>,
+  "semester": <number|null>,
+  "detail_level": "summary" | "detailed",
+  "course_filter": <string|null>
+}
 
-API PAYLOAD:
-Transmit the request using the standard JSON structure:
-"request_type":"get_grade","year":<number or null>,"semester":<number or null>,"detail_level":<"summary" or "detailed">,"course_filter":<string or null>`;
+Do NOT output Markdown code blocks. Do NOT output "Here is the JSON". JUST the JSON object.`;
 
   // Build conversation context
   let contextStr = "";
@@ -161,56 +176,39 @@ Transmit the request using the standard JSON structure:
 
   const user = `${contextStr}\nCurrent Student Question: "${userMessage}"\n\nJSON:`;
 
-  // [GEMINI UPDATE] Request body with JSON response config
-  const body = {
-    contents: [
-      {
-        role: "user",
-        parts: [{ text: system + "\n\n" + user }],
-      },
-    ],
-    generationConfig: {
-      maxOutputTokens: 100,
-      temperature: 0,
-      response_mime_type: "application/json", // Enforce JSON
-    },
-  };
-
-  // [GEMINI UPDATE] Gemini API Endpoint
-  const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${key}`,
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    }
-  );
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    throw new Error(`Gemini extraction failed: ${text}`);
-  }
-
-  const data = await resp.json();
-  const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text ?? "{}";
-
   try {
+    const raw = await callGeminiWithFallbacks({
+      systemPrompt: system,
+      userPrompt: user,
+      jsonMode: true
+    });
+
     console.log("DEBUG: GEMINI Raw Output:", raw);
-    return JSON.parse(raw);
+
+    // Robust JSON extraction: Find the first '{' and last '}'
+    const jsonStart = raw.indexOf('{');
+    const jsonEnd = raw.lastIndexOf('}');
+
+    if (jsonStart !== -1 && jsonEnd !== -1) {
+      const jsonStr = raw.substring(jsonStart, jsonEnd + 1);
+      return JSON.parse(jsonStr);
+    }
+
+    // Fallback if no brackets found (unlikely with strict prompt)
+    throw new Error("No JSON object found in response");
+
   } catch (e) {
-    console.error("Failed to parse GEMINI JSON:", raw);
+    console.error("Failed to parse GEMINI JSON:", e);
     return {};
   }
 }
 
+
+
+
 /**
  * POST /api/chat
  * Responds with { reply, source, sessionId, sessionTitle? }
- * - Creates session (or validates provided one)
- * - Generates a title (LLM if enabled, otherwise local) for new sessions or if the session has zero messages
- * - Saves user message and bot reply, updates session activity
  */
 export async function handleChat(req, res) {
   const userId = req.user?.userId;
@@ -231,7 +229,7 @@ export async function handleChat(req, res) {
       String(process.env.ENABLE_GEMINI_TITLES || process.env.ENABLE_OPENAI_TITLES || "false").toLowerCase() ===
       "true";
 
-    // safe message count for logging (avoid querying with null sessionId)
+    // safe message count for logging
     let msgCountForLog = 0;
     if (sessionId) {
       const cRes = await db.query(
@@ -256,7 +254,7 @@ export async function handleChat(req, res) {
       );
       sessionId = sessionRes.rows[0].id;
 
-      // generate title: try LLM if enabled, otherwise local fallback
+      // generate title
       if (useLLMTitle) {
         try {
           const llmTitle = await generateTitleWithLLM(userMessageSafe);
@@ -266,10 +264,7 @@ export async function handleChat(req, res) {
             sessionId,
           ]);
         } catch (llmErr) {
-          console.error(
-            "LLM title generation failed, falling back to local:",
-            llmErr
-          );
+          console.error("LLM title generation failed, falling back to local:", llmErr.message);
           const local = generateTitleFromMessageLocal(userMessageSafe);
           sessionTitle = local;
           await db.query(`UPDATE chat_sessions SET title = $1 WHERE id = $2`, [
@@ -292,7 +287,7 @@ export async function handleChat(req, res) {
         [sessionId, userId]
       );
       if (sCheck.rowCount === 0) {
-        // invalid session for this user -> create new session (and generate title)
+        // invalid session -> create new
         const sessionRes = await db.query(
           `INSERT INTO chat_sessions (user_id, started_at) VALUES ($1, now()) RETURNING id`,
           [userId]
@@ -308,10 +303,7 @@ export async function handleChat(req, res) {
               [llmTitle, sessionId]
             );
           } catch (llmErr) {
-            console.error(
-              "LLM title generation failed, falling back to local:",
-              llmErr
-            );
+            console.error("LLM title generation failed, falling back to local:", llmErr.message);
             const local = generateTitleFromMessageLocal(userMessageSafe);
             sessionTitle = local;
             await db.query(
@@ -328,11 +320,8 @@ export async function handleChat(req, res) {
           ]);
         }
       } else {
-        // session exists and belongs to user
+        // session exists
         sessionTitle = sCheck.rows[0].title || null;
-
-        // ONLY generate a title if this session truly has NO messages yet.
-        // This prevents overwriting titles after the session already has content.
         if (!sessionTitle) {
           const msgCountRes = await db.query(
             `SELECT COUNT(*) AS cnt FROM messages WHERE session_id = $1`,
@@ -340,7 +329,6 @@ export async function handleChat(req, res) {
           );
           const count = Number(msgCountRes.rows[0].cnt || 0);
           if (count === 0) {
-            // safe to generate title — it's the first message for this session
             if (useLLMTitle) {
               try {
                 const llmTitle = await generateTitleWithLLM(userMessageSafe);
@@ -350,10 +338,7 @@ export async function handleChat(req, res) {
                   [llmTitle, sessionId]
                 );
               } catch (llmErr) {
-                console.error(
-                  "LLM title generation failed, falling back to local:",
-                  llmErr
-                );
+                console.error("LLM title generation failed, falling back to local:", llmErr.message);
                 const local = generateTitleFromMessageLocal(userMessageSafe);
                 sessionTitle = local;
                 await db.query(
@@ -369,9 +354,6 @@ export async function handleChat(req, res) {
                 [local, sessionId]
               );
             }
-          } else {
-            // session already has messages — do NOT overwrite title
-            // sessionTitle remains null or existing title if any
           }
         }
       }
@@ -391,13 +373,12 @@ export async function handleChat(req, res) {
     // Declare msgLower early so it can be used in all intent checks
     const msgLower = userMessageSafe.toLowerCase();
 
-    // ---------- 0) Login intent detection ----------
+    // ---------- 0) Login intent ----------
     if (msgLower.startsWith("login ")) {
       const parts = message.trim().split(/\s+/);
       if (parts.length >= 3) {
-        // simple parsing: login <user> <pass>
         const username = parts[1];
-        const password = parts.slice(2).join(" "); // allow spaces in password if any? usually not but safe
+        const password = parts.slice(2).join(" ");
 
         const loginRes = await PortalLoginService.loginToPortal(
           username,
@@ -405,7 +386,6 @@ export async function handleChat(req, res) {
         );
 
         if (loginRes.success) {
-          // Store cookies AND encrypted credentials in DB
           const encryptedPass = encrypt(password);
           await db.query(
             `UPDATE users SET portal_cookies = $1, portal_username = $2, portal_password_encrypted = $3 WHERE id = $4`,
@@ -438,7 +418,7 @@ export async function handleChat(req, res) {
       }
     }
 
-    // ---------- 1) Registration-intent detection ----------
+    // ---------- 1) Registration-intent ----------
     const registrationKeywords = [
       "register",
       "registration",
@@ -448,11 +428,7 @@ export async function handleChat(req, res) {
       "registration date",
       "how do i register",
     ];
-    const looksLikeRegistration = registrationKeywords.some((k) =>
-      msgLower.includes(k)
-    );
-
-    if (looksLikeRegistration) {
+    if (registrationKeywords.some((k) => msgLower.includes(k))) {
       const evRes = await db.query(
         `SELECT id, title, description, start_at, end_at, location FROM registration_events
          WHERE title ILIKE $1 OR coalesce(description,'') ILIKE $1
@@ -480,14 +456,12 @@ export async function handleChat(req, res) {
       }
     }
 
-    // ---------- 2) Portal/Grades intent detection ----------
-    // Improved regex to handle variations and typos: grade, cgpa, gpa, result, mark, score, garde, status, breakdown, courses, subjects, semester
+    // ---------- 2) Portal/Grades intent ----------
     const gradesRegex =
       /(grade|cgpa|gpa|result|mark|score|garde|status|breakdown|courses|subjects|semester)/i;
-    const looksLikeGrades = gradesRegex.test(msgLower);
 
-    if (looksLikeGrades) {
-      // Check if user has cookies OR stored credentials
+    if (gradesRegex.test(msgLower)) {
+      // Check cookies/creds
       const userRes = await db.query(
         `SELECT portal_cookies, portal_username, portal_password_encrypted FROM users WHERE id = $1`,
         [userId]
@@ -497,7 +471,7 @@ export async function handleChat(req, res) {
       const encryptedPass = userData?.portal_password_encrypted;
       const portalUser = userData?.portal_username;
 
-      // If no cookies, try to auto-login using stored credentials
+      // Auto-login if needed
       if (!cookiesJson && encryptedPass && portalUser) {
         console.log("No cookies found, attempting auto-login for user", userId);
         try {
@@ -510,7 +484,6 @@ export async function handleChat(req, res) {
             if (loginRes.success) {
               console.log("Auto-login successful");
               cookiesJson = JSON.stringify(loginRes.cookies);
-              // Update DB with new cookies
               await db.query(
                 `UPDATE users SET portal_cookies = $1 WHERE id = $2`,
                 [cookiesJson, userId]
@@ -544,10 +517,9 @@ export async function handleChat(req, res) {
         return res.json({ reply, source: "portal", sessionId, sessionTitle });
       }
 
-      // Use LLM to extract Year, Semester, and Course Filter with conversation context
+      // LLM Extraction
       let options = {};
       try {
-        // Fetch recent conversation history for context
         const historyRes = await db.query(
           `SELECT sender, text FROM messages 
            WHERE session_id = $1 
@@ -555,7 +527,7 @@ export async function handleChat(req, res) {
            LIMIT 6`,
           [sessionId]
         );
-        const conversationHistory = historyRes.rows.reverse(); // Oldest first
+        const conversationHistory = historyRes.rows.reverse();
 
         options = await extractGradeParamsWithLLM(
           userMessageSafe,
@@ -563,13 +535,10 @@ export async function handleChat(req, res) {
         );
         console.log("DEBUG: LLM Extracted options:", options);
       } catch (err) {
-        console.error(
-          "LLM extraction failed, falling back to null options (latest):",
-          err
-        );
+        console.error("LLM extraction failed, options={}:", err.message);
       }
 
-      // Fetch real grades from portal
+      // Fetch grades
       try {
         let cookies = JSON.parse(cookiesJson);
         let gradesResult = await PortalLoginService.fetchGrades(
@@ -577,11 +546,9 @@ export async function handleChat(req, res) {
           options
         );
 
-        // Retry logic: If failed, try to re-login and fetch again
+        // Retry login if failed
         if (!gradesResult.success && encryptedPass && portalUser) {
-          console.log(
-            "Fetch failed (likely session expired). Attempting auto-re-login..."
-          );
+          console.log("Fetch failed. Attempting auto-re-login...");
           try {
             const decryptedPass = decrypt(encryptedPass);
             if (decryptedPass) {
@@ -592,18 +559,14 @@ export async function handleChat(req, res) {
               if (loginRes.success) {
                 console.log("Re-login successful. Retrying fetch...");
                 cookies = loginRes.cookies;
-                // Update DB with new cookies
                 await db.query(
                   `UPDATE users SET portal_cookies = $1 WHERE id = $2`,
                   [JSON.stringify(cookies), userId]
                 );
-                // Retry fetch with new cookies
                 gradesResult = await PortalLoginService.fetchGrades(
                   cookies,
                   options
                 );
-              } else {
-                console.error("Re-login failed:", loginRes.error);
               }
             }
           } catch (retryErr) {
@@ -611,12 +574,8 @@ export async function handleChat(req, res) {
           }
         }
 
-        // If still failed after retry
         if (!gradesResult.success) {
-          console.error("Failed to fetch grades even after retry.");
-          const reply =
-            "I found an issue with your current portal session. While I could connect, the system rejected the grade request. This usually means the session is invalid or the credentials are incorrect. Please ensure your username and password are correct, log out of the portal settings, and then log back in.";
-
+          const reply = "I found an issue with your current portal session. Please re-login in Portal Settings.";
           await db.query(
             `INSERT INTO messages (session_id, sender, text) VALUES ($1,$2,$3)`,
             [sessionId, "bot", reply]
@@ -625,103 +584,58 @@ export async function handleChat(req, res) {
             `UPDATE chat_sessions SET started_at = now() WHERE id = $1`,
             [sessionId]
           );
-
           return res.json({ reply, source: "portal", sessionId, sessionTitle });
         }
 
-        // --- SUCCESS CASE ---
+        // Success formatting
         const gradesData = gradesResult.data;
         let reply = "";
 
         if (!gradesData || gradesData.length === 0) {
-          reply =
-            "I successfully accessed the portal, but I couldn't find any grade records for the specified year/semester.";
+          reply = "I successfully accessed the portal, but I couldn't find any grade records for the specified year/semester.";
         } else {
           const detailLevel = options.detail_level || "summary";
           const courseFilter = options.course_filter || null;
 
-          console.log("DEBUG: courseFilter =", courseFilter);
-          console.log("DEBUG: gradesData length =", gradesData.length);
-
-          // Filter logic
           const formattedParts = [];
           let foundAnyCourse = false;
 
           for (const g of gradesData) {
-            console.log(
-              `DEBUG: Checking Year ${g.batch}, Semester ${g.semester
-              }, courses count: ${g.courses ? g.courses.length : 0}`
-            );
-
-            // If strict course filtering is on, we ONLY show the course if found.
-            // We do NOT show the semester summary unless we found the course in it.
-
             if (courseFilter) {
               if (g.courses && g.courses.length > 0) {
-                console.log(
-                  `DEBUG: First 3 course titles in Year ${g.batch} Sem ${g.semester}:`,
-                  g.courses
-                    .slice(0, 3)
-                    .map((c) => c.CourseTitle || c.CourseName || "NO TITLE")
-                );
-
                 const filterLower = courseFilter.toLowerCase();
                 const matchingCourses = g.courses.filter((c) => {
                   const title = (c.CourseTitle || "").toLowerCase();
                   const code = (c.CourseCode || "").toLowerCase();
-                  return (
-                    title.includes(filterLower) || code.includes(filterLower)
-                  );
+                  return (title.includes(filterLower) || code.includes(filterLower));
                 });
 
                 if (matchingCourses.length > 0) {
                   foundAnyCourse = true;
-                  // Found matches! Format them.
                   const courseLines = matchingCourses
                     .map((c) => {
-                      const name =
-                        c.CourseTitle || c.CourseName || "Unknown Course";
+                      const name = c.CourseTitle || c.CourseName || "Unknown Course";
                       const code = c.CourseCode || "";
-                      const grade =
-                        c.LetterGrade ||
-                        c.Letter ||
-                        c.Grade ||
-                        c.StudentGrade ||
-                        "-";
+                      const grade = c.LetterGrade || c.Letter || c.Grade || c.StudentGrade || "-";
                       return `${name} (${code}): ${grade}`;
                     })
                     .join("\n");
-
-                  // Add to output. We can optionally include the semester header for context
-                  formattedParts.push(
-                    `Year ${g.batch}, Semester ${g.semester}\n${courseLines}`
-                  );
+                  formattedParts.push(`Year ${g.batch}, Semester ${g.semester}\n${courseLines}`);
                 }
               }
             } else {
-              // Standard behavior (Summary or Detailed Breakdown of whole semester)
               let text = `Year ${g.batch}, Semester ${g.semester}\n`;
               text += `• GPA: ${g.semesterGpa}\n`;
               text += `• CGPA: ${g.cgpa}\n`;
               text += `• Status: ${g.status}`;
 
-              if (
-                detailLevel === "detailed" &&
-                g.courses &&
-                g.courses.length > 0
-              ) {
+              if (detailLevel === "detailed" && g.courses && g.courses.length > 0) {
                 text += `\n\nCourse Breakdown:\n`;
                 text += g.courses
                   .map((c) => {
-                    const name =
-                      c.CourseTitle || c.CourseName || "Unknown Course";
+                    const name = c.CourseTitle || c.CourseName || "Unknown Course";
                     const code = c.CourseCode || "";
-                    const grade =
-                      c.LetterGrade ||
-                      c.Letter ||
-                      c.Grade ||
-                      c.StudentGrade ||
-                      "-";
+                    const grade = c.LetterGrade || c.Letter || c.Grade || c.StudentGrade || "-";
                     return `• ${name} (${code}): ${grade}`;
                   })
                   .join("\n");
@@ -733,14 +647,9 @@ export async function handleChat(req, res) {
           }
 
           if (courseFilter) {
-            if (foundAnyCourse) {
-              reply = formattedParts.join("\n\n---\n\n");
-            } else {
-              reply = `I couldn't find any course matching "${courseFilter}" in your records.`;
-            }
+            reply = foundAnyCourse ? formattedParts.join("\n\n---\n\n") : `I couldn't find any course matching "${courseFilter}" in your records.`;
           } else {
-            reply =
-              "Here are your results:\n\n" + formattedParts.join("\n\n---\n\n");
+            reply = "Here are your results:\n\n" + formattedParts.join("\n\n---\n\n");
           }
         }
 
@@ -752,36 +661,10 @@ export async function handleChat(req, res) {
           `UPDATE chat_sessions SET started_at = now() WHERE id = $1`,
           [sessionId]
         );
-
         return res.json({ reply, source: "portal", sessionId, sessionTitle });
       } catch (err) {
         console.error("Error fetching grades:", err);
-
-        // Check if this is an authentication/authorization error
-        const isAuthError =
-          err.message &&
-          (err.message.includes("401") ||
-            err.message.includes("403") ||
-            err.message.includes("Unauthorized") ||
-            err.message.includes("authentication") ||
-            err.message.includes("session") ||
-            err.code === "ERR_BAD_REQUEST");
-
-        let reply;
-        if (isAuthError) {
-          reply =
-            "⚠️ I'm having trouble accessing your grades from the portal. This usually happens when your session has expired.\n\n" +
-            "📍 **To reconnect:**\n" +
-            "1. Click on your profile picture (top right)\n" +
-            "2. Select 'Portal Settings'\n" +
-            "3. Click 'Disconnect Portal Account'\n" +
-            "4. Re-enter your credentials and click 'Save & Connect'\n\n" +
-            "This will refresh your connection to the student portal.";
-        } else {
-          reply =
-            "I encountered an unexpected error while fetching your grades. Please try again later or contact support if the issue persists.";
-        }
-
+        const reply = "I encountered an error while fetching your grades. Please try again later.";
         await db.query(
           `INSERT INTO messages (session_id, sender, text) VALUES ($1,$2,$3)`,
           [sessionId, "bot", reply]
@@ -790,7 +673,6 @@ export async function handleChat(req, res) {
           `UPDATE chat_sessions SET started_at = now() WHERE id = $1`,
           [sessionId]
         );
-
         return res.json({ reply, source: "portal", sessionId, sessionTitle });
       }
     }
@@ -814,7 +696,7 @@ export async function handleChat(req, res) {
       return res.json({ reply, source: "faq", sessionId, sessionTitle });
     }
 
-    // ---------- 4) Gemini fallback (Replaces OpenAI) ----------
+    // ---------- 4) Gemini fallback (with Retry/Fallback) ----------
     const contextRes = await db.query(
       `SELECT question, answer FROM faqs ORDER BY created_at DESC LIMIT 3`
     );
@@ -830,77 +712,8 @@ export async function handleChat(req, res) {
 
     const userPrompt = `${faqContext}\nStudent asked: ${userMessageSafe}`;
 
-    // [GEMINI UPDATE] Using GEMINI_API_KEY and GEMINI_MODEL
-    const geminiKey = process.env.GEMINI_API_KEY;
-    const geminiModel = process.env.GEMINI_MODEL || "gemini-1.5-flash-001";
-
-    if (!geminiKey) {
-      console.error("Gemini API key missing for chat fallback.");
-      throw new Error("Gemini API key not configured");
-    }
-
-    const body = {
-      contents: [
-        {
-          parts: [{ text: systemMessage + "\n\n" + userPrompt }],
-        },
-      ],
-      generationConfig: {
-        maxOutputTokens: 2000,
-        temperature: 0.2,
-      },
-    };
-
-    let geminiResp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${geminiKey}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(body),
-      }
-    );
-
-    // simple fallback: if 404 (model not found), try 'gemini-pro'
-    if (geminiResp.status === 404) {
-      console.warn(`Primary model ${geminiModel} not found (404). Retrying with 'gemini-pro'...`);
-      geminiResp = await fetch(
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${geminiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }
-      );
-    }
-
-    if (!geminiResp.ok) {
-      const errText = await geminiResp.text();
-      console.error("Gemini error:", geminiResp.status, errText);
-      const fallbackReply =
-        "I couldn't generate an answer right now. Please try again later.";
-      await db.query(
-        `INSERT INTO messages (session_id, sender, text) VALUES ($1,$2,$3)`,
-        [sessionId, "bot", fallbackReply]
-      );
-      await db.query(
-        `UPDATE chat_sessions SET started_at = now() WHERE id = $1`,
-        [sessionId]
-      );
-      return res.status(502).json({
-        error: "AI service error",
-        details: errText,
-        sessionId,
-        sessionTitle,
-      });
-    }
-
-    const geminiData = await geminiResp.json();
-    const aiText = geminiData?.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
-    const reply =
-      aiText ||
-      "I couldn't generate an answer right now. Please try again later.";
+    const aiText = await callGeminiWithFallbacks({ systemPrompt: systemMessage, userPrompt });
+    const reply = aiText || "I couldn't generate an answer right now. Please try again later.";
 
     await db.query(
       `INSERT INTO messages (session_id, sender, text) VALUES ($1,$2,$3)`,
